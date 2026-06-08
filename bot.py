@@ -1,6 +1,6 @@
 """
 Telegram Bot with Selenium Automation for 8-Step Signup Wizard
-Designed for Render.com deployment with Docker support
+Designed for Render.com deployment with Gunicorn + Flask
 """
 
 import logging
@@ -9,7 +9,9 @@ import string
 import random
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
+import threading
 
+from flask import Flask, request, jsonify
 from telegram import Update, ForceReply
 from telegram.ext import (
     Application,
@@ -39,6 +41,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Flask app
+app = Flask(__name__)
+
 # Conversation states
 WAITING_FOR_OTP = 1
 AWAITING_USER_INPUT = 2
@@ -49,7 +54,11 @@ PAGE_LOAD_TIMEOUT = 20
 
 # Config (update with your values)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-SIGNUP_URL = os.getenv("SIGNUP_URL", "http://localhost:8000")  # Your local/hosted URL
+SIGNUP_URL = os.getenv("SIGNUP_URL", "http://localhost:8000")
+PORT = int(os.getenv("PORT", 8000))
+
+# Global bot instance
+telegram_bot = None
 
 
 class SignupAutomation:
@@ -616,21 +625,63 @@ class TelegramSignupBot:
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         self.app.add_error_handler(self.error_handler)
 
-    async def run(self):
-        """Start the Telegram bot"""
+    async def initialize(self):
+        """Initialize the bot"""
         self.app = Application.builder().token(self.token).build()
         self.setup_handlers()
-
-        logger.info("Starting Telegram bot...")
         await self.app.initialize()
         await self.app.start()
         await self.app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Telegram bot initialized and polling started")
 
-        logger.info("Bot is running...")
+
+# Flask Routes
+@app.route("/", methods=["GET"])
+def home():
+    """Health check endpoint"""
+    return jsonify({"status": "ok", "message": "Bot is running"}), 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Health check for Render"""
+    return jsonify({"status": "healthy"}), 200
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """Webhook endpoint for Telegram updates (optional)"""
+    try:
+        update = Update.de_json(request.get_json(), telegram_bot.app.bot)
+        asyncio.create_task(telegram_bot.app.process_update(update))
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/info", methods=["GET"])
+def info():
+    """Get bot info"""
+    return jsonify({
+        "status": "running",
+        "signup_url": SIGNUP_URL,
+        "active_sessions": len(telegram_bot.user_sessions) if telegram_bot else 0
+    }), 200
+
+
+def start_bot():
+    """Start the Telegram bot in a separate thread"""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(telegram_bot.initialize())
 
 
 def main():
     """Main entry point"""
+    global telegram_bot
+
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         logger.error("TELEGRAM_BOT_TOKEN not set. Set it as an environment variable.")
         return
@@ -638,13 +689,15 @@ def main():
     if not SIGNUP_URL or SIGNUP_URL == "http://localhost:8000":
         logger.warning("SIGNUP_URL not set. Using default: http://localhost:8000")
 
-    bot = TelegramSignupBot(TELEGRAM_BOT_TOKEN)
+    telegram_bot = TelegramSignupBot(TELEGRAM_BOT_TOKEN)
 
-    try:
-        import asyncio
-        asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+    # Start bot in a background thread
+    bot_thread = threading.Thread(target=start_bot, daemon=True)
+    bot_thread.start()
+
+    logger.info(f"Starting Flask server on port {PORT}")
+    # Run Flask app with Gunicorn (Gunicorn will call this)
+    app.run(host="0.0.0.0", port=PORT, debug=False)
 
 
 if __name__ == "__main__":
