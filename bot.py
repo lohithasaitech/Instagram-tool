@@ -33,6 +33,8 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
     WebDriverException,
 )
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
 
 # Configure logging
 logging.basicConfig(
@@ -97,7 +99,9 @@ class SignupAutomation:
             options.add_argument("--disable-logging")
             options.add_argument("--disable-extensions")
 
-            self.driver = webdriver.Chrome(options=options)
+            # Use webdriver-manager to automatically download ChromeDriver
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
             self.driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
             logger.info("Chrome WebDriver initialized successfully")
 
@@ -653,6 +657,7 @@ def webhook():
     """Webhook endpoint for Telegram updates (optional)"""
     try:
         update = Update.de_json(request.get_json(), telegram_bot.app.bot)
+        import asyncio
         asyncio.create_task(telegram_bot.app.process_update(update))
         return jsonify({"ok": True}), 200
     except Exception as e:
